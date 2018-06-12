@@ -1,0 +1,131 @@
+- name: playbook for vagrant
+  become: yes
+  become_user: root
+  become_method: sudo
+  hosts: all
+  tasks:
+    - name: disable SELINUX
+      selinux:
+        state: disabled
+    - name: disable firewalld service
+      systemd:
+        name: firewalld
+        state: stopped
+        enabled: False
+    - name: remove existing timezone file
+      file:
+        path: /etc/localtime
+        state: absent
+    - name: configure EST timezone
+      file:
+        src: /usr/share/zoneinfo/EST
+        dest: /etc/localtime
+        state: link
+    - name: create group for flask app
+      group:
+        name: flask
+        gid: 1001
+        state: present
+    - name: create user for flask app
+      user:
+        name: flask
+        comment: User For Flask App
+        uid: 1001
+        group: flask
+        state: present
+        password: $1$PONfUndl$g/lt9NwrZ4/jMQ8dyxhec.
+    - name: install EPEL repo
+      yum:
+        name: epel-release
+        state: present
+    - name: install git, python modules, nginx, redis and supervisor
+      package:
+        name: "{{ item }}"
+        state: present
+      with_items:
+        - git
+        - python-flask
+        - python-redis
+        - nginx
+        - supervisor
+        - redis
+    - name: create directories for git clone and app logging
+      file:
+        path: "{{ item }}"
+        owner: flask
+        group: flask
+        recurse: yes
+      with_items:
+        - /webapps/zoomrx
+        - /var/log/zoomrx
+        
+    - name: Disable ssl for git repo
+      command: git config --global http.sslverify false
+      register: output
+    - debug:
+        msg: "{{ output }}"
+    - name: clone git repo
+      git:
+        repo: 'https://github.com/ZoomRx/zoomrx-devops-challenge.git'
+        dest: /webapps/zoomrx
+        clone: yes
+    - name: create supervisor config file to host flaskapp
+      copy:
+        content: |
+          [program:flaskapp]
+          user=flask
+          command=/bin/python app.py
+          directory=/webapps/zoomrx
+          stderr_logfile=/var/log/zoomrx/app.log
+          environment=PORT=5000
+          autostart=true
+          autorestart=true
+        dest: /etc/supervisord.d/flask.ini
+    - name: copy nginx config files
+      copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        mode: 0644
+        backup: yes
+      with_items:
+        - { src: "{{ playbook_dir }}/nginx.conf", dest: "/etc/nginx/nginx.conf" }
+        - { src: "{{ playbook_dir }}/flask.conf", dest: "/etc/nginx/conf.d/flask.conf" }
+    - name: REDIS config file modify to port 1234
+      replace:
+        path: /etc/redis.conf
+        regexp: '^port 6379'
+        replace: 'port 1234'
+        backup: yes
+    - name: configure logrotate for app.log
+      copy:
+        content: |
+          /var/log/zoomrx/*.log {
+              hourly
+              rotate 10
+              compress
+              notifempty
+              missingok
+          }
+        dest: /etc/logrotate.d/flask
+    - name: enable logrotation for hourly period
+      copy:
+        src: /etc/cron.daily/logrotate
+        dest: /etc/cron.hourly/logrotate
+        remote_src: yes
+        mode: 0700
+    - name: start redis service
+      systemd:
+        name: redis
+        state: started
+        enabled: True
+    - name: start flask service
+      systemd:
+        daemon_reload: yes
+        name: supervisord
+        state: started
+        enabled: True
+    - name: start nginx service
+      systemd:
+        name: nginx
+        state: started
+        enabled: True
